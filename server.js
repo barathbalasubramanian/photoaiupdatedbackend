@@ -9,6 +9,7 @@ const AdmZip = require('adm-zip');
 const pipeline = promisify(require('stream').pipeline);
 require('dotenv').config();
 const multer = require("multer");
+const { json } = require('body-parser');
 
 const app = express();
 app.use(express.json());
@@ -31,6 +32,7 @@ const drive = google.drive({
 app.post("/selected", searchfile);
 app.post("/downloadall", getFolderId, bulkdownload);
 app.post("/createFolder", createFolder);
+app.post("/downloadfile", downloadfilefun);
 app.post("/getallfolders", getallfolders, createFolder);
 
 app.get('/download/:filename', (req, res) => {
@@ -198,9 +200,9 @@ async function bulkdownload(req, res) {
 }
 
 async function createFolder(req, res) {
-    const { foldername } = req.body;
+    const { folderName } = req.body;
     const fileMetadata = {
-        name: foldername,
+        name: folderName,
         mimeType: 'application/vnd.google-apps.folder',
     };
     try {
@@ -273,7 +275,57 @@ async function processBatch(files, folderId) {
   
     return await Promise.all(uploadPromises);
 }
-    
+
+const GetFolderId = async (folderName) => {
+    try {
+      const response = await drive.files.list({
+        q: `mimeType='application/vnd.google-apps.folder' and name='${folderName}'`,
+        fields: "files(id, name)",
+        spaces: "drive",
+      });
+      const folders = response.data.files;
+      if (folders.length > 0) {
+        return folders[0].id;
+      }
+    } catch (error) {
+      console.error("Error getting folder:", error);
+      throw error;
+    }
+};
+
+const getDownloadLinkFromName = async (fileName, folderId) => {
+    try {
+      const res = await drive.files.list({
+        q: `'${folderId}' in parents and name='${fileName}' and trashed=false`,
+        fields: "files(id, name, webContentLink)",
+      });
+      const files = res.data.files;
+      if (files.length === 0) {
+        throw new Error("No files found");
+      }
+      return files[0].webContentLink;
+    } catch (error) {
+      console.error("Error fetching download link:", error);
+      throw error;
+    }
+};
+
+async function downloadfilefun (req,res) {
+    const { filename, folderName } = req.body
+    console.log(filename,folderName)
+
+    try {
+          const folderId = await GetFolderId(folderName)
+          console.log(folderId)
+          const downloadLink = await getDownloadLinkFromName(filename, folderId);
+          console.log(downloadLink)
+          res.status(200).json({ message: 'download complete', link: downloadLink });
+    } catch (error) {
+        console.error("Error searching files:", error.message);
+        res.status(500).send('Error searching files');
+    }
+}
+
 app.post("/upload", upload.array("files"), async (req, res) => {
 
     const folderName = req.body.folderName || 'defaultFolder';
