@@ -192,7 +192,7 @@ async function bulkdownload(req, res) {
         console.log('Archive has been finalized.');
         const downloadLink = `${req.protocol}://${req.get('host')}/download/${zipFileName}`;
         res.status(200).json({ message: 'Bulk download complete', downloadLink });
-
+        return
     } catch (error) {
         console.error("Error in bulk download:", error.message);
         res.status(500).send('Error in bulk download');
