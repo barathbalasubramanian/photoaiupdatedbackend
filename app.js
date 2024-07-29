@@ -22,7 +22,6 @@ const supabaseKey = process.env.NEXT_PUBLIC_SUPABASE_KEY;
 const supabase = createClient(supabaseUrl, supabaseKey);
 
 async function getOauthCredentials(username) {
-    console.log(username)
     const { data, error } = await supabase
         .from('Studio-Admin')
         .select('CLIENT_ID, CLIENT_SECRET, REDIRECT_URI,REFRESH_TOKEN')
@@ -36,28 +35,18 @@ async function getOauthCredentials(username) {
 
 async function initializeOAuth(username) {
     const credentials = await getOauthCredentials(username);
-    console.log(credentials)
     if (credentials) {
         const oauth2Client = new google.auth.OAuth2(
             credentials[0]['CLIENT_ID'],
             credentials[0]['CLIENT_SECRET'],
-            credentials[0]['REDIRECT_URI']
+            credentials[0]['REDIRECT_URI'],
         );
-        oauth2Client.setCredentials({ refresh_token: credentials[0]['REFRESH_TOKEN'] });
+        // oauth2Client.setCredentials({ refresh_token: credentials[0]['REFRESH_TOKEN'] });
         const drive = google.drive({
             version: 'v3',
             auth: oauth2Client,
         });
         console.log("OAuth Completed ..")
-        // let folderName = "barath"
-        // const response = await drive.files.list({
-        //     q: `mimeType='application/vnd.google-apps.folder' and name='${folderName}'`,
-        //     fields: 'files(id, name)',
-        //     spaces: 'drive',
-        // });
-        // const folders = response.data.files;
-        // console.log(folders)
-        // console.log(drive)
         return drive;
     } else {
         throw new Error('No credentials found for the specified user.');
@@ -67,7 +56,6 @@ async function initializeOAuth(username) {
 // Middleware to initialize OAuth and set drive in request
 async function initializeOAuthMiddleware(req, res, next) {
     const { UserID } = req.body;
-    console.log(UserID)
     try {
         const drive = await initializeOAuth(UserID);
         req.drive = drive;
@@ -146,9 +134,7 @@ app.post("/upload", upload.array("files"), initializeOAuthMiddleware, async (req
 
     try {
         const folderId = await getOrCreateFolder(drive, folderName || 'defaultFolder');
-        console.log(`Folder ID: ${folderId}`);
         const files = req.files;
-        console.log(`Number of files: ${files.length}`);
         const batchSize = 10;
         let results = [];
         for (let i = 0; i < files.length; i += batchSize) {
@@ -180,7 +166,6 @@ app.get('/download/:filename', (req, res) => {
 app.post("/selected", searchfile);
 async function searchfile(req, res) {
     const { selectedFiles, UserID } = req.body;
-    console.log(selectedFiles, "SELECTEDFILES ..");
     if (!selectedFiles || selectedFiles.length === 0) {
         return res.status(400).send('No files selected');
     }
@@ -188,7 +173,6 @@ async function searchfile(req, res) {
     const files = [];
     try {
         for (let file of selectedFiles) {
-            console.log(file.split("/")[0])
             const folderID = await getOrCreateFolder(drive, file.split("/")[0]);
             console.log(folderID)
             const response = await drive.files.list({
@@ -197,7 +181,6 @@ async function searchfile(req, res) {
                 spaces: 'drive',
             });
             files.push(...response.data.files);
-            console.log(files)
         }
 
         const zipFileName = `${uuidv4()}.zip`;
@@ -218,7 +201,7 @@ async function searchfile(req, res) {
         }
         zip.writeZip(zipPath);
         console.log('Archive has been finalized.');
-        const downloadLink = `${req.protocol}://${req.get('host')}/download/${zipFileName}`;
+        const downloadLink = `https://${req.get('host')}/download/${zipFileName}`;
         return res.status(200).json({ message: 'Bulk download complete', link: downloadLink });
     } catch (error) {
         console.error("Error searching files:", error.message);
@@ -230,36 +213,66 @@ async function searchfile(req, res) {
 
 // Download SingleFile
 app.post("/downloadfile", downloadfilefun);
-const getDownloadLinkFromName = async (drive, fileName, folderId) => {
+async function getFileIdByName(drive,fileName,folderId) {
     try {
       const res = await drive.files.list({
-        q: `'${folderId}' in parents and name='${fileName}' and trashed=false`,
-        fields: "files(id, name, webContentLink)",
+        q: `'${folderId}' in parents and name='${fileName}'`,
+        fields: 'files(id, name)',
+        spaces: 'drive',
       });
       const files = res.data.files;
       if (files.length === 0) {
-        throw new Error("No files found");
+        console.log(`No files found with name: ${fileName}`);
+        return null;
       }
-      return files[0].webContentLink;
+      return files[0].id;
     } catch (error) {
-      console.error("Error fetching download link:", error);
-      throw error;
+      console.error('Error fetching file ID:', error);
+      return null;
     }
+}
+const getDownloadLinkFromName = async (drive, fileName, folderId) => {
+    console.log(fileName)
+    const fileId = await getFileIdByName(drive,fileName,folderId);
+    try {
+        await drive.permissions.create({
+            fileId: fileId,
+            requestBody: {
+              role: 'reader',
+              type: 'anyone',
+            },
+          });
+          const file = await drive.files.get({
+            fileId: fileId,
+            fields: 'webViewLink, webContentLink',
+          });
+      
+          const webViewLink = file.data.webViewLink;
+          const webContentLink = file.data.webContentLink;
+      
+          console.log(`File is accessible via: ${webViewLink}`);
+          console.log(`Direct download link: ${webContentLink}`);
+          return webContentLink;
+
+        } catch (error) {
+        console.error("Error fetching download link:", error);
+        throw error;
+        }
 };
+
 async function downloadfilefun (req,res) {
     const { filename, folderName, UserID } = req.body
-    console.log(filename,folderName,UserID)
     const drive = await initializeOAuth(UserID)
     try {
           const folderId = await getOrCreateFolder(drive,folderName)
           const downloadLink = await getDownloadLinkFromName(drive, filename, folderId);
+          console.log(downloadLink)
           return res.status(200).json({ message: 'download complete', link: downloadLink });
     } catch (error) {
         console.error("Error searching files:", error.message);
         res.status(500).send('Error searching files');
     }
 }
-
 
 // Download As Zip
 app.post("/downloadall", getFolderId, bulkdownload);
@@ -292,7 +305,7 @@ async function bulkdownload(req, res) {
 
         zip.writeZip(zipPath);
         console.log('Archive has been finalized.');
-        const downloadLink = `${req.protocol}://${req.get('host')}/download/${zipFileName}`;
+        const downloadLink = `https://${req.get('host')}/download/${zipFileName}`;
         console.log(downloadLink)
         return res.status(200).json({ message: 'Bulk download complete', downloadLink });
         
@@ -302,9 +315,7 @@ async function bulkdownload(req, res) {
     }
 }
 async function getFolderId(req, res, next) {
-    console.log(req.body)
     const { folderName,UserID } = req.body;
-    console.log(folderName,UserID)
     const drive = await initializeOAuth(UserID)
     try {
         const response = await drive.files.list({
@@ -313,11 +324,9 @@ async function getFolderId(req, res, next) {
             spaces: 'drive',
         });
         const folders = response.data.files;
-        console.log("Hii",folders)
         if (folders.length) {
             console.log(`Folder ID for "${folderName}": ${folders[0].id}`);
             req.folderId = folders[0].id;
-            console.log(folders[0].id)
             req.drive = drive
             next();
         } else {
@@ -335,9 +344,7 @@ async function getFolderId(req, res, next) {
 app.post("/createFolder", createFolder);
 async function createFolder(req, res) {
     const { folderName,UserID } = req.body;
-    console.log(folderName,UserID)
     const drive = await initializeOAuth(UserID);
-    console.log(drive)
     const fileMetadata = {
         name: folderName,
         mimeType: 'application/vnd.google-apps.folder',
@@ -348,15 +355,13 @@ async function createFolder(req, res) {
             fields: 'id',
         });
         console.log('Folder Id:', file.data.id);
-        res.status(200).send('Folder creation success');
+        return res.status(200).send('Folder creation success');
     } catch (err) {
         console.error('Error creating folder:', err.message);
-        res.status(500).send('Error creating folder');
+        return res.status(500).send('Error creating folder');
     }
 }
 
-
-
-app.listen(8000, () => {
+app.listen(8080, () => {
     console.log('Server is running on port 8000');
 });
